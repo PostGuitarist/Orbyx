@@ -1,0 +1,35 @@
+{
+  "name": "orbyx",
+  "version": "1.0.0",
+  "description": "Isomorphic SDK for Databases",
+  "keywords": [
+    "postgres",
+    "posstgresql",
+    "supabase",
+    "neon",
+    "query-builder",
+    "database",
+    "orbyx",
+    "wrapper",
+    "node"
+  ],
+  "homepage": "https://github.com/PostGuitarist/Orbyx#readme",
+  "bugs": {
+    "url": "https://github.com/PostGuitarist/Orbyx/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PostGuitarist/Orbyx.git"
+  },
+  "license": "GPL-3.0",
+  "author": "Zaden Connell",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "devDependencies": {
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}
