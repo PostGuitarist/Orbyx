@@ -23,18 +23,28 @@
   },
   "license": "GPL-3.0",
   "author": "Zaden Connell",
-  "type": "module",
-  "main": "index.js",
+  "type": "commonjs",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "files": [
+      "dist"
+  ],
   "scripts": {
     "build": "tsup",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "jest"
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
     "@types/node": "^25.2.1",
+    "@types/pg": "^8.16.0",
+    "jest": "^30.2.0",
+    "ts-jest": "^29.4.6",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "pg": "^8.18.0",
     "tsup": "^8.5.1"
   }
 }
