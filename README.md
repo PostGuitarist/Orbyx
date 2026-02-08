@@ -159,8 +159,32 @@ You can generate these types from your schema (e.g. with Supabase CLI `supabase 
 ## Security
 
 - **Query builder**: Table, schema, and column names are validated (alphanumeric + underscore only). All values are sent as parameters; never concatenated into SQL.
-- **Raw SQL**: Use parameterized queries only. Pass user input in the `params` array and use `$1`, `$2`, … in the query string. See [SECURITY.md](SECURITY.md) for details.
-- Do not commit connection strings or secrets; use environment variables.
+- **Raw SQL**: `db.sql()` / `db.raw()` execute arbitrary SQL. Always use parameterized queries (use `$1`, `$2`, … and pass user input in `params`). Consider naming raw execution `unsafeRaw` in your own codebase to mark it clearly.
+- **Hooks**: `onQuery` receives the SQL and parameters; `onError` receives `DbError`. Orbyx redacts likely secrets (JWTs, long strings, and common secret keys) when invoking `onQuery` and invokes hooks asynchronously to avoid blocking the query flow. Still, avoid logging raw `params` unredacted in production.
+- **Safety limits (`ClientOptions.safety`)**: Orbyx exposes `safety` options to protect against large/abusive queries. Example:
+
+```ts
+const db = createClient({
+  connection: process.env.DATABASE_URL,
+  safety: {
+    maxInElements: 1000,       // max items allowed in IN/NOT IN lists
+    maxTotalParams: 5000,      // max parameters for bulk insert/upsert
+    statementTimeoutMs: 5000,  // per-query statement_timeout (SET LOCAL)
+  },
+});
+```
+
+These defaults are conservative; increase them only if you understand the resource impact.
+
+- **Statement timeouts & cancellation**: When `safety.statementTimeoutMs` is set Orbyx attempts `SET LOCAL statement_timeout` on the client before running the query so Postgres will cancel long-running statements. Query cancellation and stream iteration also support a `close()` API on the returned iterable to release the underlying client promptly.
+
+- **Least privilege & credentials**: Always run with a DB role that has the minimum necessary privileges (no superuser). Treat connection strings as secrets and rotate them regularly.
+
+- **SSL/TLS**: Orbyx accepts SSL options from the connection string or config object. In `production` a warning is logged if TLS appears disabled or `rejectUnauthorized` is false. For strict enforcement, validate TLS at deployment time and avoid `rejectUnauthorized: false`.
+
+- **Denial-of-service**: Orbyx enforces IN-list and bulk param limits to reduce the risk of memory/CPU exhaustion from user-supplied arrays. Consider additional rate-limiting in front of the DB for multi-tenant systems.
+
+See [SECURITY.md](SECURITY.md) for more operational advice.
 
 ## API summary (Supabase-js–style)
 

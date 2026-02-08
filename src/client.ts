@@ -84,13 +84,15 @@ export function createClient<
   const normalized = normalizeConfig(connection, poolOpts);
   const pool = createPool(normalized);
   const retries = options.retries;
-  const ctx = { pool, hooks, retries };
+  const safety = options.safety;
+  const ctx = { pool, hooks, retries, safety };
 
   async function sqlImpl<T = unknown[]>(
     text: string,
     params: unknown[] = [],
     runner?: Pool | PoolClient,
   ): Promise<QueryResponse<T>> {
+    const configuredTimeout = safety?.statementTimeoutMs ?? null;
     const run = runner ?? pool;
     const maxAttempts = retries?.attempts ?? 1;
     const backoffMs = retries?.backoffMs ?? 100;
@@ -99,7 +101,35 @@ export function createClient<
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         safeInvokeOnQuery(hooks, text, params);
-        const result = await run.query(text, params);
+        // If a statement timeout is configured and we are using a pool (not an existing client),
+        // acquire a client and set LOCAL timeout so it applies to this query only.
+        let client: PoolClient | null = null;
+        let result: any;
+        try {
+          if (configuredTimeout != null && (run as Pool).connect) {
+            client = await (run as Pool).connect();
+            try {
+              await client.query("SET LOCAL statement_timeout = $1", [
+                String(configuredTimeout),
+              ]);
+            } catch {
+              // ignore
+            }
+            result = await client.query(text, params);
+          } else if (configuredTimeout != null && (run as PoolClient).release) {
+            // runner is a client
+            try {
+              await (run as PoolClient).query("SET LOCAL statement_timeout = $1", [
+                String(configuredTimeout),
+              ]);
+            } catch {}
+            result = await (run as PoolClient).query(text, params);
+          } else {
+            result = await (run as Pool).query(text, params);
+          }
+        } finally {
+          if (client) client.release();
+        }
         const data = result.rows as T;
         return { data, error: null };
       } catch (err) {
@@ -166,7 +196,7 @@ export function createClient<
         safeInvokeOnError(hooks, dbErr);
         return { data: null, error: dbErr };
       }
-      const txCtx = { pool, client: conn, hooks };
+      const txCtx = { pool, client: conn, hooks, safety };
       const txClient: DbClient<DB> = {
         from(table: string, schemaOverride?: string): QueryBuilder {
           const effectiveSchema = schemaOverride ?? schema;

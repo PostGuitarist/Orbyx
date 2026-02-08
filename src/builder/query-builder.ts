@@ -25,6 +25,7 @@ import {
   parseEstimatedCount,
 } from "./compile";
 import type { BuilderState, FilterOperator } from "./types";
+import type { SafetyOptions } from "../types/index";
 import { createInitialState } from "./types";
 import type { ClientHooks, RetryOptions } from "../types/index";
 
@@ -36,6 +37,8 @@ export interface QueryBuilderContext {
   hooks?: ClientHooks;
   /** When set, transient failures are retried with backoff. */
   retries?: RetryOptions;
+  /** Safety limits inherited from client options. */
+  safety?: SafetyOptions;
 }
 
 /** pg Client internals used to cancel an in-flight query (node-pg does not type these). */
@@ -341,7 +344,7 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
     let text: string;
     let values: unknown[];
     try {
-      const compiled = compile(this.state);
+      const compiled = compile(this.state, this.ctx.safety);
       text = compiled.text;
       values = compiled.values;
     } catch (err) {
@@ -371,10 +374,22 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
       if (!this.ctx.client) {
         borrowedClient = client;
       }
+      // If statement timeout is configured, ensure we run on a client with SET LOCAL
+      if (this.ctx.safety?.statementTimeoutMs != null) {
+        const timeout = this.ctx.safety.statementTimeoutMs;
+        try {
+          await client.query("SET LOCAL statement_timeout = $1", [
+            String(timeout),
+          ]);
+        } catch {
+          // ignore; proceed without timeout if not supported
+        }
+      }
       safeInvokeOnQuery(this.ctx.hooks, text, values);
       const q = client.query(new PgQuery({ text, values }));
 
-      const iterable: AsyncIterable<TRow> = {
+      let closed = false;
+      const iterable: any = {
         async *[Symbol.asyncIterator](): AsyncGenerator<TRow> {
           try {
             const queue: TRow[] = [];
@@ -423,6 +438,19 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
             }
           }
         },
+        close(): void {
+          if (closed) return;
+          closed = true;
+          try {
+            // cancel running query and release client
+            cancelPgBackend(client as PoolClient);
+          } catch {}
+          try {
+            if (borrowedClient) {
+              borrowedClient.release();
+            }
+          } catch {}
+        },
       };
       return { data: iterable, error: null };
     } catch (err) {
@@ -436,7 +464,7 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
     let text: string;
     let values: unknown[];
     try {
-      const compiled = compile(this.state);
+      const compiled = compile(this.state, this.ctx.safety);
       text = compiled.text;
       values = compiled.values;
     } catch (err) {
@@ -475,8 +503,28 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
           this.ctx.client != null || borrowedClient != null;
 
         const runQuery = async (): Promise<QueryResponse<TRow[]>> => {
-            safeInvokeOnQuery(this.ctx.hooks, text, values);
-          const result = (await runner.query(text, values)) as QueryResult;
+          // If statement timeout is configured, ensure we run on a client and set LOCAL timeout.
+          let effectiveRunner: Pool | PoolClient = runner;
+          if (this.ctx.safety?.statementTimeoutMs != null) {
+            const timeout = this.ctx.safety.statementTimeoutMs;
+            if (effectiveRunner === this.ctx.pool) {
+              borrowedClient = await this.ctx.pool.connect();
+              effectiveRunner = borrowedClient;
+            }
+            try {
+              await (effectiveRunner as PoolClient).query(
+                "SET LOCAL statement_timeout = $1",
+                [String(timeout)],
+              );
+            } catch {
+              // ignore if not supported
+            }
+          }
+          safeInvokeOnQuery(this.ctx.hooks, text, values);
+          const result = (await (effectiveRunner as PoolClient).query(
+            text,
+            values,
+          )) as QueryResult;
           const rows = (result.rows ?? []) as TRow[];
 
           const runCount = async (): Promise<number | null> => {
@@ -488,11 +536,11 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
                 this.state.countOption === "estimated" ||
                 this.state.countOption === "planned";
               const { text: countText, values: countValues } = useEstimated
-                ? compileCountEstimated(this.state)
-                : compileCount(this.state);
+                ? compileCountEstimated(this.state, this.ctx.safety)
+                : compileCount(this.state, this.ctx.safety);
               if (!countText) return null;
               safeInvokeOnQuery(this.ctx.hooks, countText, countValues);
-              const countResult = (await runner.query(
+              const countResult = (await (effectiveRunner as PoolClient).query(
                 countText,
                 countValues,
               )) as QueryResult;
