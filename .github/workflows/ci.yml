@@ -13,6 +13,8 @@ jobs:
   build-and-test:
     name: Build & Test (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
     strategy:
       fail-fast: false
       matrix:
