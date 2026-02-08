@@ -7,6 +7,7 @@
 import type { Pool, PoolClient } from "pg";
 import { normalizeConfig, createPool, DEFAULT_SCHEMA } from "./connection";
 import { createError, createErrorFromThrown } from "./errors";
+import { safeInvokeOnQuery, safeInvokeOnError } from "./utils/hooks";
 import type {
   ClientOptions,
   PublicTableName,
@@ -97,7 +98,7 @@ export function createClient<
       new Promise((r) => setTimeout(r, ms));
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
-        hooks?.onQuery?.(text, params);
+        safeInvokeOnQuery(hooks, text, params);
         const result = await run.query(text, params);
         const data = result.rows as T;
         return { data, error: null };
@@ -108,7 +109,7 @@ export function createClient<
           err,
         );
         if (attempt === maxAttempts - 1 || !isRetriableError(err)) {
-          hooks?.onError?.(dbErr);
+          safeInvokeOnError(hooks, dbErr);
           return { data: null, error: dbErr };
         }
         await sleep(backoffMs * Math.pow(2, attempt));
@@ -162,7 +163,7 @@ export function createClient<
           "Failed to get connection for transaction",
           err,
         );
-        hooks?.onError?.(dbErr);
+        safeInvokeOnError(hooks, dbErr);
         return { data: null, error: dbErr };
       }
       const txCtx = { pool, client: conn, hooks };
@@ -226,7 +227,7 @@ export function createClient<
           err instanceof Error ? err.message : "Transaction failed",
           err,
         );
-        hooks?.onError?.(dbErr);
+        safeInvokeOnError(hooks, dbErr);
         return { data: null, error: dbErr };
       } finally {
         conn.release();

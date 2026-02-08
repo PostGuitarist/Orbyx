@@ -4,6 +4,12 @@
  */
 
 import { validateIdentifier, validateColumnList } from "../validate";
+import { createError } from "../errors";
+
+// Limits to prevent very large parameter lists or IN-lists which could be used
+// to cause excessive memory/CPU usage or very long queries.
+const MAX_IN_ELEMENTS = 1000;
+const MAX_TOTAL_PARAMS = 5000;
 import type { BuilderState } from "./types";
 
 /** Quote identifier for PostgreSQL (e.g. table, column names). Safe after validateIdentifier. */
@@ -80,6 +86,12 @@ function buildWhere(
     const col = f.column ? quoteId(f.column) : "";
     const ph = `$${idx}`;
     if (f.type === "in" && Array.isArray(f.value)) {
+      if (f.value.length > MAX_IN_ELEMENTS) {
+        throw createError(
+          "VALIDATION",
+          `IN list too large: limit ${MAX_IN_ELEMENTS} elements`,
+        );
+      }
       const inStart = idx;
       f.value.forEach((v) => {
         params.push(v);
@@ -90,6 +102,12 @@ function buildWhere(
       continue;
     }
     if (f.type === "notIn" && Array.isArray(f.value)) {
+      if (f.value.length > MAX_IN_ELEMENTS) {
+        throw createError(
+          "VALIDATION",
+          `NOT IN list too large: limit ${MAX_IN_ELEMENTS} elements`,
+        );
+      }
       const inStart = idx;
       f.value.forEach((v) => {
         params.push(v);
@@ -258,6 +276,13 @@ export function compile(state: BuilderState): {
       ? state.insertValues
       : [state.insertValues];
     const keys = Object.keys(rows[0] as Record<string, unknown>);
+    // Prevent extremely large bulk inserts that would generate too many params
+    if (rows.length * keys.length > MAX_TOTAL_PARAMS) {
+      throw createError(
+        "VALIDATION",
+        `Insert too large: would create more than ${MAX_TOTAL_PARAMS} parameters`,
+      );
+    }
     keys.forEach((k) => validateIdentifier(k, "column"));
     const cols = keys.map(quoteId).join(", ");
     const rowPlaceholders = rows
@@ -321,6 +346,12 @@ export function compile(state: BuilderState): {
       ? state.upsertValues
       : [state.upsertValues];
     const keys = Object.keys(rows[0] as Record<string, unknown>);
+    if (rows.length * keys.length > MAX_TOTAL_PARAMS) {
+      throw createError(
+        "VALIDATION",
+        `Upsert too large: would create more than ${MAX_TOTAL_PARAMS} parameters`,
+      );
+    }
     keys.forEach((k) => validateIdentifier(k, "column"));
     state.upsertConflictColumns.forEach((k) => validateIdentifier(k, "column"));
     const cols = keys.map(quoteId).join(", ");
