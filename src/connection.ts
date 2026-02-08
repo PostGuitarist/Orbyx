@@ -87,6 +87,21 @@ export function normalizeConfig(
     connectionTimeoutMillis: poolOptions.connectionTimeoutMillis,
   };
 
+  // Warn in production if SSL is not configured securely; do not fail automatically
+  try {
+    if (process.env.NODE_ENV === "production") {
+      const ssl = poolConfig.ssl as any;
+      if (ssl === false || (ssl && ssl.rejectUnauthorized === false)) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "Orbyx: running in production without secure SSL settings for Postgres. Consider enabling SSL with rejectUnauthorized=true.",
+        );
+      }
+    }
+  } catch {
+    // ignore env read issues
+  }
+
   return { poolConfig, poolOptions };
 }
 

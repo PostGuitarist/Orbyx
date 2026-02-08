@@ -11,6 +11,7 @@ import {
   isDbError,
   isRetriableError,
 } from "../errors";
+import { safeInvokeOnQuery, safeInvokeOnError } from "../utils/hooks";
 import type { QueryResponse } from "../types/index";
 import {
   validateIdentifier,
@@ -351,7 +352,7 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
             err instanceof Error ? err.message : "Invalid query",
             err,
           );
-      this.ctx.hooks?.onError?.(dbErr);
+      safeInvokeOnError(this.ctx.hooks, dbErr);
       return { data: null, error: dbErr };
     }
     if (!text) {
@@ -370,7 +371,7 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
       if (!this.ctx.client) {
         borrowedClient = client;
       }
-      this.ctx.hooks?.onQuery?.(text, values);
+      safeInvokeOnQuery(this.ctx.hooks, text, values);
       const q = client.query(new PgQuery({ text, values }));
 
       const iterable: AsyncIterable<TRow> = {
@@ -426,7 +427,7 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
       return { data: iterable, error: null };
     } catch (err) {
       const dbErr = createErrorFromThrown("QUERY", "Unknown query error", err);
-      this.ctx.hooks?.onError?.(dbErr);
+      safeInvokeOnError(this.ctx.hooks, dbErr);
       return { data: null, error: dbErr };
     }
   }
@@ -446,7 +447,7 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
             err instanceof Error ? err.message : "Invalid query",
             err,
           );
-      this.ctx.hooks?.onError?.(dbErr);
+      safeInvokeOnError(this.ctx.hooks, dbErr);
       return { data: null, error: dbErr };
     }
     if (!text) {
@@ -474,7 +475,7 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
           this.ctx.client != null || borrowedClient != null;
 
         const runQuery = async (): Promise<QueryResponse<TRow[]>> => {
-          this.ctx.hooks?.onQuery?.(text, values);
+            safeInvokeOnQuery(this.ctx.hooks, text, values);
           const result = (await runner.query(text, values)) as QueryResult;
           const rows = (result.rows ?? []) as TRow[];
 
@@ -490,7 +491,7 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
                 ? compileCountEstimated(this.state)
                 : compileCount(this.state);
               if (!countText) return null;
-              this.ctx.hooks?.onQuery?.(countText, countValues);
+              safeInvokeOnQuery(this.ctx.hooks, countText, countValues);
               const countResult = (await runner.query(
                 countText,
                 countValues,
@@ -512,7 +513,7 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
                 "PGRST116",
                 "Multiple rows returned for single()",
               );
-              this.ctx.hooks?.onError?.(err);
+              safeInvokeOnError(this.ctx.hooks, err);
               return { data: null, error: err };
             }
             const data = (
@@ -531,7 +532,7 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
                 "PGRST116",
                 "Multiple rows returned for maybeSingle()",
               );
-              this.ctx.hooks?.onError?.(err);
+              safeInvokeOnError(this.ctx.hooks, err);
               return { data: null, error: err };
             }
             const data = (
@@ -582,7 +583,7 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
         const dbErr = isDbError(err)
           ? err
           : createErrorFromThrown("QUERY", "Unknown query error", err);
-        this.ctx.hooks?.onError?.(dbErr);
+        safeInvokeOnError(this.ctx.hooks, dbErr);
         if (attempt === maxAttempts - 1 || !isRetriableError(err)) {
           return { data: null, error: dbErr };
         }
