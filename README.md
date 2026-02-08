@@ -1,6 +1,8 @@
 # Orbyx
 
-Supabase-js–style Postgres client. Universal for any server that speaks the **Postgres wire protocol**: use a connection string or host/port config and you’re set.
+Isomorphic SDK for Databases.
+
+Orbyx provides a Supabase-js–style, isomorphic client for databases. It is designed to work in multiple runtimes (Node and browser) and to offer a consistent, ergonomic API for CRUD, raw SQL, transactions, and streaming. Currently Orbyx ships a Postgres client that speaks the **Postgres wire protocol** (use a connection string or host/port config), but the API and architecture are intended to support additional database backends in the future.
 
 ## Compatibility
 
