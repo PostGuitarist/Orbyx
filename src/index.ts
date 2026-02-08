@@ -21,7 +21,3 @@ export type { DbError } from "./errors";
 export { createError, isDbError, isRetriableError } from "./errors";
 export { QueryBuilder } from "./builder/query-builder";
 export type { FilterOperator } from "./builder/types";
-
-export function add(a: number, b: number): number {
-  return a + b;
-}

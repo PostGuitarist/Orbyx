@@ -28,11 +28,12 @@
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
   "files": [
-      "dist"
+    "dist"
   ],
   "scripts": {
     "build": "tsup",
-    "test": "jest"
+    "test": "jest",
+    "clean-integration": "ts-node scripts/clean-integration.ts"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",
@@ -44,6 +45,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "dotenv": "^17.2.4",
     "pg": "^8.18.0",
     "tsup": "^8.5.1"
   }

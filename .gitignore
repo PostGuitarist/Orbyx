@@ -6,3 +6,28 @@
 
 # Build files
 /dist
+
+# Environment and secrets (never commit)
+.env
+.env.*
+!.env.example
+*.pem
+
+# OS and editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Logs and debug
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Temporary
+tmp/
+temp/
+.cache/
