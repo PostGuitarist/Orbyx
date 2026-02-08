@@ -91,6 +91,16 @@ export interface RetryOptions {
   backoffMs?: number;
 }
 
+/** Safety and operational limits to protect against abuse. */
+export interface SafetyOptions {
+  /** Max elements allowed in an IN/NOT IN list. Default 1000. */
+  maxInElements?: number;
+  /** Max total query parameters allowed for insert/upsert. Default 5000. */
+  maxTotalParams?: number;
+  /** Per-query statement timeout in milliseconds. When set, queries use SET LOCAL statement_timeout. */
+  statementTimeoutMs?: number | null;
+}
+
 /** Full client options (connection + schema + pool + hooks). */
 export interface ClientOptions<DB extends Database = Database> {
   /** Connection: DSN string or config object. */
@@ -103,6 +113,8 @@ export interface ClientOptions<DB extends Database = Database> {
   hooks?: ClientHooks;
   /** Optional retries for transient failures (connection, 08xxx, 40xxx). */
   retries?: RetryOptions;
+  /** Safety and operational limits. */
+  safety?: SafetyOptions;
   /** Reserved for generic Database type. */
   _database?: DB;
 }

@@ -5,12 +5,13 @@
 
 import { validateIdentifier, validateColumnList } from "../validate";
 import { createError } from "../errors";
-
-// Limits to prevent very large parameter lists or IN-lists which could be used
-// to cause excessive memory/CPU usage or very long queries.
-const MAX_IN_ELEMENTS = 1000;
-const MAX_TOTAL_PARAMS = 5000;
+import type { SafetyOptions } from "../types/index";
 import type { BuilderState } from "./types";
+
+// Default limits to prevent very large parameter lists or IN-lists which could be used
+// to cause excessive memory/CPU usage or very long queries.
+const DEFAULT_MAX_IN_ELEMENTS = 1000;
+const DEFAULT_MAX_TOTAL_PARAMS = 5000;
 
 /** Quote identifier for PostgreSQL (e.g. table, column names). Safe after validateIdentifier. */
 function quoteId(name: string): string {
@@ -32,6 +33,7 @@ function buildWhere(
   state: BuilderState,
   params: unknown[],
   startIndex: number,
+  safety?: SafetyOptions,
 ): { sql: string; nextIndex: number } {
   if (state.filters.length === 0) {
     return { sql: "", nextIndex: startIndex };
@@ -86,10 +88,11 @@ function buildWhere(
     const col = f.column ? quoteId(f.column) : "";
     const ph = `$${idx}`;
     if (f.type === "in" && Array.isArray(f.value)) {
-      if (f.value.length > MAX_IN_ELEMENTS) {
+      const maxIn = safety?.maxInElements ?? DEFAULT_MAX_IN_ELEMENTS;
+      if (f.value.length > maxIn) {
         throw createError(
           "VALIDATION",
-          `IN list too large: limit ${MAX_IN_ELEMENTS} elements`,
+          `IN list too large: limit ${maxIn} elements`,
         );
       }
       const inStart = idx;
@@ -102,10 +105,11 @@ function buildWhere(
       continue;
     }
     if (f.type === "notIn" && Array.isArray(f.value)) {
-      if (f.value.length > MAX_IN_ELEMENTS) {
+      const maxIn = safety?.maxInElements ?? DEFAULT_MAX_IN_ELEMENTS;
+      if (f.value.length > maxIn) {
         throw createError(
           "VALIDATION",
-          `NOT IN list too large: limit ${MAX_IN_ELEMENTS} elements`,
+          `NOT IN list too large: limit ${maxIn} elements`,
         );
       }
       const inStart = idx;
@@ -216,7 +220,7 @@ function buildWhere(
 /**
  * Compiles state into { text, values } for pg.query().
  */
-export function compile(state: BuilderState): {
+export function compile(state: BuilderState, safety?: SafetyOptions): {
   text: string;
   values: unknown[];
 } {
@@ -236,7 +240,12 @@ export function compile(state: BuilderState): {
             .split(",")
             .map((c) => quoteId(c.trim()))
             .join(", ");
-    const { sql: whereSql, nextIndex } = buildWhere(state, values, paramIndex);
+    const { sql: whereSql, nextIndex } = buildWhere(
+      state,
+      values,
+      paramIndex,
+      safety,
+    );
     paramIndex = nextIndex;
     let text = `SELECT ${colList} FROM ${fullTable}${whereSql}`;
     if (state.orderBy.length > 0) {
@@ -277,10 +286,11 @@ export function compile(state: BuilderState): {
       : [state.insertValues];
     const keys = Object.keys(rows[0] as Record<string, unknown>);
     // Prevent extremely large bulk inserts that would generate too many params
-    if (rows.length * keys.length > MAX_TOTAL_PARAMS) {
+    const maxTotal = DEFAULT_MAX_TOTAL_PARAMS;
+    if (rows.length * keys.length > maxTotal) {
       throw createError(
         "VALIDATION",
-        `Insert too large: would create more than ${MAX_TOTAL_PARAMS} parameters`,
+        `Insert too large: would create more than ${maxTotal} parameters`,
       );
     }
     keys.forEach((k) => validateIdentifier(k, "column"));
@@ -319,7 +329,12 @@ export function compile(state: BuilderState): {
       values.push(uv[k]);
       return `${quoteId(k)} = ${ph}`;
     });
-    const { sql: whereSql, nextIndex } = buildWhere(state, values, paramIndex);
+    const { sql: whereSql, nextIndex } = buildWhere(
+      state,
+      values,
+      paramIndex,
+      safety,
+    );
     paramIndex = nextIndex;
     let text = `UPDATE ${fullTable} SET ${setParts.join(", ")}${whereSql}`;
     if (state.returnSelect) {
@@ -346,10 +361,11 @@ export function compile(state: BuilderState): {
       ? state.upsertValues
       : [state.upsertValues];
     const keys = Object.keys(rows[0] as Record<string, unknown>);
-    if (rows.length * keys.length > MAX_TOTAL_PARAMS) {
+    const maxTotal = DEFAULT_MAX_TOTAL_PARAMS;
+    if (rows.length * keys.length > maxTotal) {
       throw createError(
         "VALIDATION",
-        `Upsert too large: would create more than ${MAX_TOTAL_PARAMS} parameters`,
+        `Upsert too large: would create more than ${maxTotal} parameters`,
       );
     }
     keys.forEach((k) => validateIdentifier(k, "column"));
@@ -390,7 +406,7 @@ export function compile(state: BuilderState): {
   }
 
   if (state.operation === "delete") {
-    const { sql: whereSql } = buildWhere(state, values, paramIndex);
+    const { sql: whereSql } = buildWhere(state, values, paramIndex, safety);
     let text = `DELETE FROM ${fullTable}${whereSql}`;
     if (state.returnSelect) {
       validateColumnList(state.returnSelect);
@@ -421,14 +437,14 @@ export function compile(state: BuilderState): {
 /**
  * Builds a COUNT(*) query from the same table/filters as state. Used when countOption is "exact".
  */
-export function compileCount(state: BuilderState): {
+export function compileCount(state: BuilderState, safety?: SafetyOptions): {
   text: string;
   values: unknown[];
 } {
   const values: unknown[] = [];
   const paramIndex = 1;
   const fullTable = quotedTableSafe(state.schema, state.table);
-  const { sql: whereSql } = buildWhere(state, values, paramIndex);
+  const { sql: whereSql } = buildWhere(state, values, paramIndex, safety);
   const text = `SELECT COUNT(*)::int AS count FROM ${fullTable}${whereSql}`;
   return { text, values };
 }
@@ -437,7 +453,10 @@ export function compileCount(state: BuilderState): {
  * Builds EXPLAIN (FORMAT JSON) for the same SELECT (without LIMIT) to get planner row estimate.
  * Used when countOption is "estimated" or "planned". Parse result to get Plan Rows.
  */
-export function compileCountEstimated(state: BuilderState): {
+export function compileCountEstimated(
+  state: BuilderState,
+  safety?: SafetyOptions,
+): {
   text: string;
   values: unknown[];
 } {
@@ -456,7 +475,7 @@ export function compileCountEstimated(state: BuilderState): {
           .split(",")
           .map((c) => quoteId(c.trim()))
           .join(", ");
-  const { sql: whereSql } = buildWhere(state, values, paramIndex);
+  const { sql: whereSql } = buildWhere(state, values, paramIndex, safety);
   const selectText = `SELECT ${colList} FROM ${fullTable}${whereSql}`;
   const text = `EXPLAIN (FORMAT JSON) ${selectText}`;
   return { text, values };

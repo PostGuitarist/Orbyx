@@ -72,7 +72,23 @@ export function safeInvokeOnError(hooks: ClientHooks | undefined, err: unknown):
   if (!hooks?.onError) return;
   setImmediate(() => {
     try {
-      hooks.onError?.(err as any);
+      // If err looks like DbError, sanitize details before invoking hook to avoid leaking raw DB internals.
+      const e = err as any;
+      if (e && typeof e === "object" && typeof e.code === "string" && typeof e.message === "string") {
+        const safe: Record<string, unknown> = { code: e.code, message: e.message };
+        if (typeof e.pgCode === "string") safe.pgCode = e.pgCode;
+        // If details is an object, copy only safe fields
+        const d = e.details;
+        if (d && typeof d === "object") {
+          const safeDetails: Record<string, unknown> = {};
+          if (typeof (d as any).code === "string") safeDetails.code = (d as any).code;
+          if (typeof (d as any).detail === "string") safeDetails.detail = (d as any).detail;
+          if (Object.keys(safeDetails).length > 0) safe.details = safeDetails;
+        }
+        hooks.onError?.(safe as any);
+      } else {
+        hooks.onError?.(err as any);
+      }
     } catch {
       // swallow to avoid throwing during error reporting
     }
