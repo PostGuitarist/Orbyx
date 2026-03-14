@@ -121,7 +121,7 @@ export function validateRange(from: number, to: number): void {
   if (from > to) {
     throw createError(
       "VALIDATION",
-      "Invalid range: from must be less than or equal to to",
+      "Invalid range: from must be less than or equal to the upper bound",
     );
   }
 }
