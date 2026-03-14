@@ -11,7 +11,7 @@ export type QueryOperation =
   | "delete"
   | "rpc";
 
-/** Operators supported by .not(column, operator, value). */
+/** Operators supported by .not(), .or() string, and filter helpers. */
 export type FilterOperator =
   | "eq"
   | "neq"
@@ -22,7 +22,32 @@ export type FilterOperator =
   | "like"
   | "ilike"
   | "is"
-  | "in";
+  | "in"
+  | "notIn"
+  | "isDistinct"
+  | "contains"
+  | "containedBy"
+  | "overlaps"
+  | "rangeGt"
+  | "rangeLt"
+  | "rangeGte"
+  | "rangeLte"
+  | "rangeAdjacent";
+
+/**
+ * Operators that .not(column, op, value) supports.
+ * Restricted to single-value comparisons — multi-value and special ops are excluded.
+ */
+export type NotOperator =
+  | "eq"
+  | "neq"
+  | "gt"
+  | "gte"
+  | "lt"
+  | "lte"
+  | "like"
+  | "ilike"
+  | "is";
 
 export interface FilterClause {
   type:
@@ -43,6 +68,11 @@ export interface FilterClause {
     | "contains"
     | "containedBy"
     | "overlaps"
+    | "rangeGt"
+    | "rangeLt"
+    | "rangeGte"
+    | "rangeLte"
+    | "rangeAdjacent"
     | "not"
     | "textSearch";
   column?: string;
@@ -52,7 +82,7 @@ export interface FilterClause {
   /** For .match() — record of column -> value. */
   matchRecord?: Record<string, unknown>;
   /** For .not(column, operator, value). */
-  notOperator?: FilterOperator;
+  notOperator?: NotOperator;
   /** For .textSearch() — config and type. */
   textSearchConfig?: string;
   textSearchType?: "plain" | "phrase" | "websearch";
@@ -68,7 +98,7 @@ export interface BuilderState {
   upsertValues: Record<string, unknown> | Record<string, unknown>[] | null;
   upsertConflictColumns: string[] | null;
   rpcName: string | null;
-  rpcArgs: unknown[] | null;
+  rpcArgs: unknown[] | Record<string, unknown> | null;
   filters: FilterClause[];
   /** Multiple order columns; each .order() appends. */
   orderBy: Array<{ column: string; ascending: boolean; nullsFirst?: boolean }>;
@@ -84,6 +114,10 @@ export interface BuilderState {
   abortSignal: AbortSignal | null;
   /** For upsert: if true, ON CONFLICT DO NOTHING; else DO UPDATE. */
   upsertIgnoreDuplicates: boolean;
+  /** When true, execute() throws the DbError instead of returning { error }. */
+  throwOnError: boolean;
+  /** When true, run a count-only query (no rows returned). */
+  head: boolean;
   params: unknown[];
   paramIndex: number;
 }
@@ -114,6 +148,8 @@ export function createInitialState(
     countOption: null,
     abortSignal: null,
     upsertIgnoreDuplicates: false,
+    throwOnError: false,
+    head: false,
     params: [],
     paramIndex: 1,
   };

@@ -15,7 +15,7 @@ const IDENTIFIER_REGEX = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
  */
 export function validateIdentifier(
   name: string,
-  kind: "schema" | "table" | "column" | "function",
+  kind: "schema" | "table" | "column" | "function" | "argument",
 ): void {
   if (typeof name !== "string" || name.length === 0) {
     throw createError(
@@ -119,6 +119,9 @@ export function validateRange(from: number, to: number): void {
     );
   }
   if (from > to) {
-    throw createError("VALIDATION", "Invalid range: from must be ≤ to");
+    throw createError(
+      "VALIDATION",
+      "Invalid range: from must be less than or equal to to",
+    );
   }
 }

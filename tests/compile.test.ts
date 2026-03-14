@@ -4,6 +4,7 @@
 
 import { compile, compileCount, compileCountEstimated, parseEstimatedCount } from "../src/builder/compile";
 import { createInitialState } from "../src/builder/types";
+import type { FilterClause } from "../src/builder/types";
 import { isDbError } from "../src/errors";
 
 describe("compile select", () => {
@@ -202,5 +203,144 @@ describe("compile rpc", () => {
     expect(text).toContain("$2");
     expect(values.length).toBe(2);
     expect(values).toEqual([1, "active"]);
+  });
+});
+
+describe("compile is filter (literal NULL/TRUE/FALSE)", () => {
+  test("IS NULL generates literal NULL without a parameter", () => {
+    const state = createInitialState("users", "public");
+    state.operation = "select";
+    state.selectColumns = "*";
+    state.filters.push({ type: "is", column: "deleted_at", value: null });
+    const { text, values } = compile(state);
+    expect(text).toContain('"deleted_at" IS NULL');
+    // NULL uses no bound parameter
+    expect(values.length).toBe(0);
+  });
+
+  test("IS TRUE generates literal TRUE without a parameter", () => {
+    const state = createInitialState("users", "public");
+    state.operation = "select";
+    state.selectColumns = "*";
+    state.filters.push({ type: "is", column: "active", value: true });
+    const { text, values } = compile(state);
+    expect(text).toContain('"active" IS TRUE');
+    expect(values.length).toBe(0);
+  });
+
+  test("IS FALSE generates literal FALSE without a parameter", () => {
+    const state = createInitialState("users", "public");
+    state.operation = "select";
+    state.selectColumns = "*";
+    state.filters.push({ type: "is", column: "active", value: false });
+    const { text, values } = compile(state);
+    expect(text).toContain('"active" IS FALSE');
+    expect(values.length).toBe(0);
+  });
+
+  test("IS filter can be combined with other filters", () => {
+    const state = createInitialState("users", "public");
+    state.operation = "select";
+    state.selectColumns = "*";
+    state.filters.push({ type: "eq", column: "id", value: 1 });
+    state.filters.push({ type: "is", column: "deleted_at", value: null });
+    const { text, values } = compile(state);
+    expect(text).toContain('"id" = $1');
+    expect(text).toContain('"deleted_at" IS NULL');
+    // Only the eq filter uses a parameter
+    expect(values.length).toBe(1);
+    expect(values[0]).toBe(1);
+  });
+});
+
+describe("compile or filter with string operators", () => {
+  test("or filter compiles with like and ilike", () => {
+    const state = createInitialState("users", "public");
+    state.operation = "select";
+    state.selectColumns = "*";
+    state.filters.push({
+      type: "or",
+      orFilters: [
+        { column: "name", op: "like", value: "Ali%" },
+        { column: "email", op: "ilike", value: "%@example.com" },
+      ],
+    });
+    const { text, values } = compile(state);
+    expect(text).toContain('"name" LIKE $1');
+    expect(text).toContain('"email" ILIKE $2');
+    expect(values).toEqual(["Ali%", "%@example.com"]);
+  });
+
+  test("or filter with is:null generates literal IS NULL", () => {
+    const state = createInitialState("users", "public");
+    state.operation = "select";
+    state.selectColumns = "*";
+    state.filters.push({
+      type: "or",
+      orFilters: [
+        { column: "deleted_at", op: "is", value: null },
+        { column: "name", op: "eq", value: "Alice" },
+      ],
+    });
+    const { text, values } = compile(state);
+    expect(text).toContain('"deleted_at" IS NULL');
+    expect(text).toContain('"name" = $1');
+    // Only the eq adds a param
+    expect(values.length).toBe(1);
+    expect(values[0]).toBe("Alice");
+  });
+});
+
+describe("compile range filters", () => {
+  const ops: Array<[string, string]> = [
+    ["rangeGt", ">>"],
+    ["rangeLt", "<<"],
+    ["rangeGte", "&>"],
+    ["rangeLte", "&<"],
+    ["rangeAdjacent", "-|-"],
+  ];
+  test.each(ops)("%s emits correct operator %s", (filterType, sqlOp) => {
+    const state = createInitialState("events", "public");
+    state.operation = "select";
+    state.selectColumns = "*";
+    state.filters.push({ type: filterType as FilterClause["type"], column: "during", value: "[2024-01-01,2024-12-31]" });
+    const { text, values } = compile(state);
+    expect(text).toContain(`"during" ${sqlOp} $1`);
+    expect(values).toEqual(["[2024-01-01,2024-12-31]"]);
+  });
+});
+
+describe("compile rpc named args", () => {
+  test("object args generate named := syntax", () => {
+    const state = createInitialState("get_user", "public");
+    state.operation = "rpc";
+    state.rpcName = "get_user";
+    state.rpcArgs = { user_id: 42, active: true };
+    const { text, values } = compile(state);
+    expect(text).toContain('SELECT * FROM "public"."get_user"');
+    expect(text).toContain('"user_id" := $1');
+    expect(text).toContain('"active" := $2');
+    expect(values).toEqual([42, true]);
+  });
+
+  test("array args still work (positional)", () => {
+    const state = createInitialState("get_user", "public");
+    state.operation = "rpc";
+    state.rpcName = "get_user";
+    state.rpcArgs = [1, "active"];
+    const { text, values } = compile(state);
+    expect(text).toContain("$1");
+    expect(text).toContain("$2");
+    expect(values).toEqual([1, "active"]);
+  });
+
+  test("empty object produces call with no args", () => {
+    const state = createInitialState("no_args_fn", "public");
+    state.operation = "rpc";
+    state.rpcName = "no_args_fn";
+    state.rpcArgs = {};
+    const { text, values } = compile(state);
+    expect(text).toBe('SELECT * FROM "public"."no_args_fn"()');
+    expect(values).toEqual([]);
   });
 });
