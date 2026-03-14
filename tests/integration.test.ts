@@ -14,7 +14,9 @@ const skipIntegration = !DATABASE_URL || DATABASE_URL.length === 0;
 (skipIntegration ? describe.skip : describe)("integration (requires DATABASE_URL)", () => {
   const SCHEMA = "integration_test";
   const db = createClient({ connection: DATABASE_URL, schema: SCHEMA });
-  const table = `orbyx_integration_test_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const table = `orbyx_integration_test_${suffix}`;
+  const rpcFn = `add_values_${suffix}`;
 
   beforeAll(async () => {
     await db.sql(`CREATE SCHEMA IF NOT EXISTS "${SCHEMA}"`);
@@ -22,13 +24,13 @@ const skipIntegration = !DATABASE_URL || DATABASE_URL.length === 0;
       `CREATE TABLE IF NOT EXISTS "${SCHEMA}"."${table}" (id serial PRIMARY KEY, name text, value int)`
     );
     await db.sql(
-      `CREATE OR REPLACE FUNCTION "${SCHEMA}"."add_values"(a int, b int) RETURNS int LANGUAGE sql AS $$ SELECT a + b $$`
+      `CREATE OR REPLACE FUNCTION "${SCHEMA}"."${rpcFn}"(a int, b int) RETURNS int LANGUAGE sql AS $$ SELECT a + b $$`
     );
   });
 
   afterAll(async () => {
     // Comment out the await db.sql to intentionally keep test tables and rows for inspection.
-    await db.sql(`DROP FUNCTION IF EXISTS "${SCHEMA}"."add_values"(int, int)`);
+    await db.sql(`DROP FUNCTION IF EXISTS "${SCHEMA}"."${rpcFn}"(int, int)`);
     await db.sql(`DROP TABLE IF EXISTS "${SCHEMA}"."${table}"`);
     await db.end();
   });
@@ -245,10 +247,10 @@ const skipIntegration = !DATABASE_URL || DATABASE_URL.length === 0;
   });
 
   test("rpc() with named args object", async () => {
-    const { data, error } = await db.rpc("add_values", { a: 3, b: 7 });
+    const { data, error } = await db.rpc(rpcFn, { a: 3, b: 7 });
     expect(error).toBeNull();
     expect(Array.isArray(data)).toBe(true);
-    const row = (data as unknown[])[0] as { add_values: number };
-    expect(row.add_values).toBe(10);
+    const row = (data as unknown[])[0] as Record<string, number>;
+    expect(row[rpcFn]).toBe(10);
   });
 });
