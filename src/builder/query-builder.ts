@@ -23,7 +23,7 @@ import {
   compileCountEstimated,
   parseEstimatedCount,
 } from "./compile";
-import type { BuilderState, FilterOperator } from "./types";
+import type { BuilderState, FilterOperator, NotOperator } from "./types";
 import { createInitialState } from "./types";
 import type { ClientHooks, RetryOptions } from "../types/index";
 
@@ -59,8 +59,64 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Splits a PostgREST-style OR string at top-level commas (respecting parentheses).
+ * e.g. "name.eq.Alice,age.gt.10" → ["name.eq.Alice", "age.gt.10"]
+ */
+function splitOrSegments(s: string): string[] {
+  const result: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "(") depth++;
+    else if (s[i] === ")") { if (depth > 0) depth--; }
+    else if (s[i] === "," && depth === 0) {
+      result.push(s.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  result.push(s.slice(start).trim());
+  return result.filter(Boolean);
+}
+
+/**
+ * Parses a PostgREST-style OR filter string into filter objects.
+ * Format per segment: "column.operator.value"
+ * e.g. "name.eq.Alice,age.gt.10,active.is.true"
+ */
+function parseOrString(
+  orStr: string,
+): Array<{ column: string; op: string; value: unknown }> {
+  return splitOrSegments(orStr).map((seg) => {
+    const firstDot = seg.indexOf(".");
+    if (firstDot === -1) throw new Error(`Invalid or() segment: "${seg}"`);
+    const column = seg.slice(0, firstDot);
+    const rest = seg.slice(firstDot + 1);
+    const secondDot = rest.indexOf(".");
+    if (secondDot === -1) throw new Error(`Invalid or() segment: "${seg}"`);
+    const op = rest.slice(0, secondDot);
+    const rawValue = rest.slice(secondDot + 1);
+    let value: unknown = rawValue;
+    if (rawValue === "null") value = null;
+    else if (rawValue === "true") value = true;
+    else if (rawValue === "false") value = false;
+    else {
+      const n = Number(rawValue);
+      if (rawValue !== "" && !Number.isNaN(n)) value = n;
+    }
+    return { column, op, value };
+  });
+}
+
+/** Allowed operators in PostgREST-style or() filter strings. */
+const VALID_OR_OPS = new Set(["eq", "neq", "gt", "gte", "lt", "lte", "like", "ilike", "is"]);
+
 /** Row/result type for select and rpc. Defaults to untyped record. */
-export class QueryBuilder<TRow = Record<string, unknown>> {
+export class QueryBuilder<
+  TRow = Record<string, unknown>,
+  TInsert = Record<string, unknown>,
+  TUpdate = Record<string, unknown>,
+> {
   private state: BuilderState;
   private ctx: QueryBuilderContext;
 
@@ -69,6 +125,27 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
     validateIdentifier(table, "table");
     this.state = createInitialState(table, schema);
     this.ctx = ctx;
+  }
+
+  /**
+   * Factory for creating a QueryBuilder in RPC mode.
+   * Makes the intent explicit — avoids passing the function name as a table identifier.
+   *
+   * "__rpc__" is a deliberate sentinel placeholder passed to the constructor as the
+   * `table` argument to satisfy the required parameter; `state.table` is never used
+   * for RPC queries — `state.rpcName` (set by rpc() below) is what drives compilation.
+   */
+  static forRpc<T = Record<string, unknown>>(
+    fn: string,
+    schema: string,
+    ctx: QueryBuilderContext,
+    args: unknown[] | Record<string, unknown> = [],
+  ): QueryBuilder<T> {
+    return new QueryBuilder<T, Record<string, unknown>, Record<string, unknown>>(
+      "__rpc__",
+      schema,
+      ctx,
+    ).rpc(fn, args) as QueryBuilder<T>;
   }
 
   /**
@@ -91,16 +168,20 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
     return this;
   }
 
-  insert(values: Record<string, unknown> | Record<string, unknown>[]): this {
+  insert(
+    values: TInsert | TInsert[],
+  ): QueryBuilder<TRow, TInsert, TUpdate> {
     this.state.operation = "insert";
-    this.state.insertValues = values;
-    return this;
+    this.state.insertValues = values as
+      | Record<string, unknown>
+      | Record<string, unknown>[];
+    return this as QueryBuilder<TRow, TInsert, TUpdate>;
   }
 
-  update(values: Record<string, unknown>): this {
+  update(values: TUpdate): QueryBuilder<TRow, TInsert, TUpdate> {
     this.state.operation = "update";
-    this.state.updateValues = values;
-    return this;
+    this.state.updateValues = values as Record<string, unknown>;
+    return this as QueryBuilder<TRow, TInsert, TUpdate>;
   }
 
   /**
@@ -109,14 +190,16 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
    * @param options.ignoreDuplicates - If true, DO NOTHING on conflict; else DO UPDATE
    */
   upsert(
-    values: Record<string, unknown> | Record<string, unknown>[],
+    values: TInsert | TInsert[],
     options: {
       onConflict: string[] | string;
       ignoreDuplicates?: boolean;
     },
-  ): this {
+  ): QueryBuilder<TRow, TInsert, TUpdate> {
     this.state.operation = "upsert";
-    this.state.upsertValues = values;
+    this.state.upsertValues = values as
+      | Record<string, unknown>
+      | Record<string, unknown>[];
     this.state.upsertConflictColumns = Array.isArray(options.onConflict)
       ? options.onConflict
       : options.onConflict
@@ -124,7 +207,7 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
           .map((s) => s.trim())
           .filter(Boolean);
     this.state.upsertIgnoreDuplicates = options.ignoreDuplicates === true;
-    return this;
+    return this as QueryBuilder<TRow, TInsert, TUpdate>;
   }
 
   delete(): this {
@@ -132,7 +215,7 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
     return this;
   }
 
-  rpc(fn: string, args: unknown[] = []): this {
+  rpc(fn: string, args: unknown[] | Record<string, unknown> = []): this {
     this.state.operation = "rpc";
     this.state.rpcName = fn;
     this.state.rpcArgs = args;
@@ -189,17 +272,35 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
     return this;
   }
 
+  /**
+   * OR filter. Accepts either a PostgREST-style filter string
+   * (e.g. `'name.eq.Alice,age.gt.10'`) or an array of filter objects.
+   */
   or(
-    filters: Array<{
-      column: string;
-      op: "eq" | "neq" | "gt" | "gte" | "lt" | "lte";
-      value: unknown;
-    }>,
+    filters:
+      | string
+      | Array<{ column: string; op: FilterOperator; value: unknown }>,
   ): this {
-    this.state.filters.push({
-      type: "or",
-      orFilters: filters,
-    });
+    if (typeof filters === "string") {
+      let parsed: ReturnType<typeof parseOrString>;
+      try {
+        parsed = parseOrString(filters);
+      } catch (err) {
+        throw createError(
+          "VALIDATION",
+          err instanceof Error ? err.message : "Invalid or() filter string",
+          err,
+        );
+      }
+      for (const entry of parsed) {
+        if (!VALID_OR_OPS.has(entry.op)) {
+          throw createError("VALIDATION", `Invalid or() operator: "${entry.op}"`);
+        }
+      }
+      this.state.filters.push({ type: "or", orFilters: parsed });
+    } else {
+      this.state.filters.push({ type: "or", orFilters: filters });
+    }
     return this;
   }
 
@@ -242,8 +343,47 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
     return this;
   }
 
+  /** Range column is strictly right of value. Uses >> operator. */
+  rangeGt(column: string, range: string): this {
+    this.state.filters.push({ type: "rangeGt", column, value: range });
+    return this;
+  }
+
+  /** Range column is strictly left of value. Uses << operator. */
+  rangeLt(column: string, range: string): this {
+    this.state.filters.push({ type: "rangeLt", column, value: range });
+    return this;
+  }
+
+  /** Range column does not extend left of value. Uses &> operator. */
+  rangeGte(column: string, range: string): this {
+    this.state.filters.push({ type: "rangeGte", column, value: range });
+    return this;
+  }
+
+  /** Range column does not extend right of value. Uses &< operator. */
+  rangeLte(column: string, range: string): this {
+    this.state.filters.push({ type: "rangeLte", column, value: range });
+    return this;
+  }
+
+  /** Range column is adjacent to value. Uses -|- operator. */
+  rangeAdjacent(column: string, range: string): this {
+    this.state.filters.push({ type: "rangeAdjacent", column, value: range });
+    return this;
+  }
+
+  /**
+   * Generic filter escape hatch. Equivalent to calling the specific operator method.
+   * All FilterOperator values are supported.
+   */
+  filter(column: string, operator: FilterOperator, value: unknown): this {
+    this.state.filters.push({ type: operator, column, value });
+    return this;
+  }
+
   /** Negate a filter. Supabase-style escape hatch. */
-  not(column: string, operator: FilterOperator, value: unknown): this {
+  not(column: string, operator: NotOperator, value: unknown): this {
     this.state.filters.push({
       type: "not",
       column,
@@ -313,6 +453,68 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
   maybeSingle(): this {
     this.state.maybeSingle = true;
     return this;
+  }
+
+  /** When called, execute() throws the DbError instead of returning { data: null, error }. */
+  throwOnError(): this {
+    this.state.throwOnError = true;
+    return this;
+  }
+
+  /**
+   * Run a count-only query: returns { data: null, count: N, error: null }.
+   * No rows are fetched. Equivalent to Supabase head: true option.
+   */
+  head(): this {
+    this.state.head = true;
+    return this;
+  }
+
+  /**
+   * Execute the query as EXPLAIN (FORMAT JSON) and return the query plan.
+   * @param options.analyze - If true, runs EXPLAIN (ANALYZE, FORMAT JSON).
+   *
+   * **WARNING**: `analyze: true` actually *executes* the query to collect real
+   * runtime statistics. Do not use `explain({ analyze: true })` on
+   * INSERT/UPDATE/DELETE queries unless you intend to run them — they will
+   * modify data.
+   */
+  async explain(options?: { analyze?: boolean }): Promise<QueryResponse<unknown[]>> {
+    let text: string;
+    let values: unknown[];
+    try {
+      const compiled = compile(this.state);
+      text = compiled.text;
+      values = compiled.values;
+    } catch (err) {
+      const dbErr = isDbError(err)
+        ? err
+        : createError(
+            "VALIDATION",
+            err instanceof Error ? err.message : "Invalid query",
+            err,
+          );
+      this.ctx.hooks?.onError?.(dbErr);
+      return { data: null, error: dbErr };
+    }
+    if (!text) {
+      return {
+        data: null,
+        error: createError("VALIDATION", "Invalid query state for explain()"),
+      };
+    }
+    const analyzeClause = options?.analyze ? ", ANALYZE" : "";
+    const explainText = `EXPLAIN (FORMAT JSON${analyzeClause}) ${text}`;
+    const runner = this.ctx.client ?? this.ctx.pool;
+    try {
+      this.ctx.hooks?.onQuery?.(explainText, values);
+      const result = await runner.query(explainText, values);
+      return { data: result.rows as unknown[], error: null };
+    } catch (err) {
+      const dbErr = createErrorFromThrown("QUERY", "explain() failed", err);
+      this.ctx.hooks?.onError?.(dbErr);
+      return { data: null, error: dbErr };
+    }
   }
 
   /**
@@ -425,6 +627,11 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
       };
       return { data: iterable, error: null };
     } catch (err) {
+      // Release the borrowed connection if query setup fails (before the iterable runs)
+      if (borrowedClient) {
+        borrowedClient.release();
+        borrowedClient = null;
+      }
       const dbErr = createErrorFromThrown("QUERY", "Unknown query error", err);
       this.ctx.hooks?.onError?.(dbErr);
       return { data: null, error: dbErr };
@@ -459,6 +666,66 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
       };
     }
 
+    // head() mode: count-only, no rows returned
+    if (this.state.head) {
+      if (this.state.operation !== "select") {
+        const opErr = createError(
+          "VALIDATION",
+          "head() is only valid for select queries",
+        );
+        this.ctx.hooks?.onError?.(opErr);
+        if (this.state.throwOnError) throw opErr;
+        return { data: null, error: opErr };
+      }
+      let countText: string;
+      let countValues: unknown[];
+      try {
+        const compiled = compileCount(this.state);
+        countText = compiled.text;
+        countValues = compiled.values;
+      } catch (err) {
+        const dbErr = isDbError(err)
+          ? err
+          : createError(
+              "VALIDATION",
+              err instanceof Error ? err.message : "Invalid query",
+              err,
+            );
+        this.ctx.hooks?.onError?.(dbErr);
+        if (this.state.throwOnError) throw dbErr;
+        return { data: null, error: dbErr };
+      }
+      const headRunner = this.ctx.client ?? this.ctx.pool;
+      const maxHeadAttempts = this.ctx.retries?.attempts ?? 1;
+      const headBackoffMs = this.ctx.retries?.backoffMs ?? 100;
+      if (maxHeadAttempts <= 0) {
+        const zeroErr = createError("QUERY", "head() called with retries.attempts <= 0");
+        this.ctx.hooks?.onError?.(zeroErr);
+        if (this.state.throwOnError) throw zeroErr;
+        return { data: null, error: zeroErr };
+      }
+      for (let attempt = 0; attempt < maxHeadAttempts; attempt++) {
+        try {
+          this.ctx.hooks?.onQuery?.(countText, countValues);
+          const result = await headRunner.query(countText, countValues);
+          const row = (result.rows[0] ?? {}) as { count: number };
+          return { data: null, count: row.count ?? null, error: null };
+        } catch (err) {
+          const dbErr = createErrorFromThrown("QUERY", "head() count query failed", err);
+          this.ctx.hooks?.onError?.(dbErr);
+          if (attempt === maxHeadAttempts - 1 || !isRetriableError(err)) {
+            if (this.state.throwOnError) throw dbErr;
+            return { data: null, error: dbErr };
+          }
+          await sleep(Math.min(headBackoffMs * Math.pow(2, attempt), 30_000));
+        }
+      }
+      // Unreachable under normal config (the loop always returns or throws above),
+      // but satisfies the compiler when maxHeadAttempts > 0.
+      /* istanbul ignore next */
+      return { data: null, error: createError("QUERY", "head() max retries exceeded") };
+    }
+
     const maxAttempts = this.ctx.retries?.attempts ?? 1;
     const backoffMs = this.ctx.retries?.backoffMs ?? 100;
 
@@ -477,6 +744,7 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
           this.ctx.hooks?.onQuery?.(text, values);
           const result = (await runner.query(text, values)) as QueryResult;
           const rows = (result.rows ?? []) as TRow[];
+          const pgRowCount = result.rowCount ?? undefined;
 
           const runCount = async (): Promise<number | null> => {
             if (!this.state.countOption || this.state.operation !== "select") {
@@ -507,22 +775,27 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
           };
 
           if (this.state.single) {
-            if (rows && Array.isArray(rows) && rows.length > 1) {
+            if (rows.length === 0) {
+              const err = createError("PGRST116", "No rows returned for single()");
+              this.ctx.hooks?.onError?.(err);
+              if (this.state.throwOnError) throw err;
+              return { data: null, error: err };
+            }
+            if (rows.length > 1) {
               const err = createError(
                 "PGRST116",
                 "Multiple rows returned for single()",
               );
               this.ctx.hooks?.onError?.(err);
+              if (this.state.throwOnError) throw err;
               return { data: null, error: err };
             }
-            const data = (
-              Array.isArray(rows) && rows.length === 1 ? rows[0] : rows
-            ) as TRow;
             const count = await runCount();
             return {
-              data,
+              data: rows[0],
               error: null,
               count: count ?? undefined,
+              rowCount: pgRowCount,
             } as QueryResponse<TRow[]>;
           }
           if (this.state.maybeSingle) {
@@ -532,6 +805,7 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
                 "Multiple rows returned for maybeSingle()",
               );
               this.ctx.hooks?.onError?.(err);
+              if (this.state.throwOnError) throw err;
               return { data: null, error: err };
             }
             const data = (
@@ -546,11 +820,12 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
               data,
               error: null,
               count: count ?? undefined,
+              rowCount: pgRowCount,
             } as QueryResponse<TRow[]>;
           }
 
           const count = await runCount();
-          return { data: rows, error: null, count: count ?? undefined };
+          return { data: rows, error: null, count: count ?? undefined, rowCount: pgRowCount };
         };
 
         let response: QueryResponse<TRow[]>;
@@ -584,16 +859,19 @@ export class QueryBuilder<TRow = Record<string, unknown>> {
           : createErrorFromThrown("QUERY", "Unknown query error", err);
         this.ctx.hooks?.onError?.(dbErr);
         if (attempt === maxAttempts - 1 || !isRetriableError(err)) {
+          if (this.state.throwOnError) throw dbErr;
           return { data: null, error: dbErr };
         }
-        await sleep(backoffMs * Math.pow(2, attempt));
+        await sleep(Math.min(backoffMs * Math.pow(2, attempt), 30_000));
       } finally {
         if (borrowedClient != null) {
           borrowedClient.release();
         }
       }
     }
-    return { data: null, error: createError("QUERY", "Max retries exceeded") };
+    const maxErr = createError("QUERY", "Max retries exceeded");
+    if (this.state.throwOnError) throw maxErr;
+    return { data: null, error: maxErr };
   }
 
   then<TResult1 = QueryResponse<TRow[]>, TResult2 = never>(

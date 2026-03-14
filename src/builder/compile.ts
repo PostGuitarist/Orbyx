@@ -4,7 +4,34 @@
  */
 
 import { validateIdentifier, validateColumnList } from "../validate";
+import { createError } from "../errors";
 import type { BuilderState } from "./types";
+
+/** Map of standard comparison operators shared by or() and not() filter compilation. */
+const STANDARD_OP_MAP: Record<string, string> = {
+  eq: "=",
+  neq: "<>",
+  gt: ">",
+  gte: ">=",
+  lt: "<",
+  lte: "<=",
+  like: "LIKE",
+  ilike: "ILIKE",
+};
+
+/**
+ * Converts a value for an IS filter into a SQL literal keyword.
+ * Only null, true, and false are valid. Throws for any other value.
+ */
+function toIsLiteral(value: unknown, context: string): string {
+  if (value === null) return "NULL";
+  if (value === true) return "TRUE";
+  if (value === false) return "FALSE";
+  throw createError(
+    "VALIDATION",
+    `${context}: IS filter only accepts null, true, or false; got ${JSON.stringify(value)}`,
+  );
+}
 
 /** Quote identifier for PostgreSQL (e.g. table, column names). Safe after validateIdentifier. */
 function quoteId(name: string): string {
@@ -37,23 +64,20 @@ function buildWhere(
       const orParts = f.orFilters.map((o) => {
         validateIdentifier(o.column, "column");
         const col = quoteId(o.column);
+        // IS requires literal keywords, not bound params
+        if (o.op === "is") {
+          return `${col} IS ${toIsLiteral(o.value, `or() column "${o.column}"`)}`;
+        }
+        const op = STANDARD_OP_MAP[o.op];
+        if (!op) {
+          throw createError(
+            "VALIDATION",
+            `Unknown or() operator: "${o.op}"`,
+          );
+        }
         const ph = `$${idx}`;
         idx += 1;
         params.push(o.value);
-        const op =
-          o.op === "eq"
-            ? "="
-            : o.op === "neq"
-              ? "<>"
-              : o.op === "gt"
-                ? ">"
-                : o.op === "gte"
-                  ? ">="
-                  : o.op === "lt"
-                    ? "<"
-                    : o.op === "lte"
-                      ? "<="
-                      : "=";
         return `${col} ${op} ${ph}`;
       });
       parts.push("(" + orParts.join(" OR ") + ")");
@@ -80,6 +104,11 @@ function buildWhere(
     const col = f.column ? quoteId(f.column) : "";
     const ph = `$${idx}`;
     if (f.type === "in" && Array.isArray(f.value)) {
+      if (f.value.length === 0) {
+        // IN () is invalid SQL; nothing can match an empty set
+        parts.push("FALSE");
+        continue;
+      }
       const inStart = idx;
       f.value.forEach((v) => {
         params.push(v);
@@ -90,6 +119,10 @@ function buildWhere(
       continue;
     }
     if (f.type === "notIn" && Array.isArray(f.value)) {
+      if (f.value.length === 0) {
+        // NOT IN () is always true; no constraint needed
+        continue;
+      }
       const inStart = idx;
       f.value.forEach((v) => {
         params.push(v);
@@ -121,29 +154,27 @@ function buildWhere(
       continue;
     }
     if (f.type === "not" && f.notOperator !== undefined) {
+      // IS requires literal keywords — cannot use a bound parameter
+      if (f.notOperator === "is") {
+        const isLit = toIsLiteral(f.value, `not() column "${f.column ?? ""}"`);
+        parts.push(`NOT (${col} IS ${isLit})`);
+        continue;
+      }
+      const notOp = STANDARD_OP_MAP[f.notOperator];
+      if (!notOp) {
+        throw createError(
+          "VALIDATION",
+          `Unknown not() operator: "${f.notOperator}"`,
+        );
+      }
       idx += 1;
       params.push(f.value);
-      const notOp =
-        f.notOperator === "eq"
-          ? "="
-          : f.notOperator === "neq"
-            ? "<>"
-            : f.notOperator === "gt"
-              ? ">"
-              : f.notOperator === "gte"
-                ? ">="
-                : f.notOperator === "lt"
-                  ? "<"
-                  : f.notOperator === "lte"
-                    ? "<="
-                    : f.notOperator === "like"
-                      ? "LIKE"
-                      : f.notOperator === "ilike"
-                        ? "ILIKE"
-                        : f.notOperator === "is"
-                          ? "IS"
-                          : "=";
       parts.push(`NOT (${col} ${notOp} ${ph})`);
+      continue;
+    }
+    // IS NULL/TRUE/FALSE cannot use bound parameters — generate literal SQL
+    if (f.type === "is") {
+      parts.push(`${col} IS ${toIsLiteral(f.value, `is() column "${f.column ?? ""}"`)}`);
       continue;
     }
     idx += 1;
@@ -173,9 +204,6 @@ function buildWhere(
       case "ilike":
         parts.push(`${col} ILIKE ${ph}`);
         break;
-      case "is":
-        parts.push(`${col} IS ${ph}`);
-        break;
       case "isDistinct":
         parts.push(`${col} IS DISTINCT FROM ${ph}`);
         break;
@@ -187,6 +215,21 @@ function buildWhere(
         break;
       case "overlaps":
         parts.push(`${col} && ${ph}`);
+        break;
+      case "rangeGt":
+        parts.push(`${col} >> ${ph}`);
+        break;
+      case "rangeLt":
+        parts.push(`${col} << ${ph}`);
+        break;
+      case "rangeGte":
+        parts.push(`${col} &> ${ph}`);
+        break;
+      case "rangeLte":
+        parts.push(`${col} &< ${ph}`);
+        break;
+      case "rangeAdjacent":
+        parts.push(`${col} -|- ${ph}`);
         break;
       default:
         break;
@@ -257,7 +300,13 @@ export function compile(state: BuilderState): {
     const rows = Array.isArray(state.insertValues)
       ? state.insertValues
       : [state.insertValues];
+    if (rows.length === 0) {
+      throw createError("VALIDATION", "insert() requires at least one row");
+    }
     const keys = Object.keys(rows[0] as Record<string, unknown>);
+    if (keys.length === 0) {
+      throw createError("VALIDATION", "insert() row must have at least one column");
+    }
     keys.forEach((k) => validateIdentifier(k, "column"));
     const cols = keys.map(quoteId).join(", ");
     const rowPlaceholders = rows
@@ -287,6 +336,9 @@ export function compile(state: BuilderState): {
 
   if (state.operation === "update" && state.updateValues) {
     const uv = state.updateValues;
+    if (Object.keys(uv).length === 0) {
+      throw createError("VALIDATION", "update() requires at least one value");
+    }
     Object.keys(uv).forEach((k) => validateIdentifier(k, "column"));
     const setParts = Object.keys(uv).map((k) => {
       const ph = `$${paramIndex}`;
@@ -320,9 +372,23 @@ export function compile(state: BuilderState): {
     const rows = Array.isArray(state.upsertValues)
       ? state.upsertValues
       : [state.upsertValues];
+    if (rows.length === 0) {
+      throw createError("VALIDATION", "upsert() requires at least one row");
+    }
     const keys = Object.keys(rows[0] as Record<string, unknown>);
+    if (keys.length === 0) {
+      throw createError("VALIDATION", "upsert() row must have at least one column");
+    }
     keys.forEach((k) => validateIdentifier(k, "column"));
     state.upsertConflictColumns.forEach((k) => validateIdentifier(k, "column"));
+    const conflictCols = state.upsertConflictColumns;
+    const updateKeys = keys.filter((k) => !conflictCols.includes(k));
+    if (!state.upsertIgnoreDuplicates && updateKeys.length === 0) {
+      throw createError(
+        "VALIDATION",
+        "upsert() DO UPDATE has no non-conflict columns to update; use ignoreDuplicates: true for DO NOTHING",
+      );
+    }
     const cols = keys.map(quoteId).join(", ");
     const rowPlaceholders = rows
       .map((_, i) => {
@@ -334,13 +400,11 @@ export function compile(state: BuilderState): {
       keys.forEach((k) => values.push((row as Record<string, unknown>)[k])),
     );
     paramIndex += keys.length * rows.length;
-    const onConflict = state.upsertConflictColumns.map(quoteId).join(", ");
-    const conflictCols = state.upsertConflictColumns;
+    const onConflict = conflictCols.map(quoteId).join(", ");
     const doConflict = state.upsertIgnoreDuplicates
       ? "DO NOTHING"
       : "DO UPDATE SET " +
-        keys
-          .filter((k) => conflictCols !== null && !conflictCols.includes(k))
+        updateKeys
           .map((k) => `${quoteId(k)} = EXCLUDED.${quoteId(k)}`)
           .join(", ");
     let text = `INSERT INTO ${fullTable} (${cols}) VALUES ${rowPlaceholders} ON CONFLICT (${onConflict}) ${doConflict}`;
@@ -378,9 +442,20 @@ export function compile(state: BuilderState): {
   if (state.operation === "rpc" && state.rpcName) {
     const name = quotedTableSafe(schema, state.rpcName);
     const args = state.rpcArgs ?? [];
-    const placeholders = args.map((_, i) => `$${paramIndex + i}`).join(", ");
-    args.forEach((a) => values.push(a));
-    const text = `SELECT * FROM ${name}(${placeholders})`;
+    let text: string;
+    if (Array.isArray(args)) {
+      const placeholders = args.map((_, i) => `$${paramIndex + i}`).join(", ");
+      args.forEach((a) => values.push(a));
+      text = `SELECT * FROM ${name}(${placeholders})`;
+    } else {
+      const entries = Object.entries(args as Record<string, unknown>);
+      const argParts = entries.map(([key, val], i) => {
+        validateIdentifier(key, "argument");
+        values.push(val);
+        return `${quoteId(key)} := $${paramIndex + i}`;
+      });
+      text = `SELECT * FROM ${name}(${argParts.join(", ")})`;
+    }
     return { text, values };
   }
 
