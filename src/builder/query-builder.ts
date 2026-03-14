@@ -669,10 +669,13 @@ export class QueryBuilder<
     // head() mode: count-only, no rows returned
     if (this.state.head) {
       if (this.state.operation !== "select") {
-        return {
-          data: null,
-          error: createError("VALIDATION", "head() is only valid for select queries"),
-        };
+        const opErr = createError(
+          "VALIDATION",
+          "head() is only valid for select queries",
+        );
+        this.ctx.hooks?.onError?.(opErr);
+        if (this.state.throwOnError) throw opErr;
+        return { data: null, error: opErr };
       }
       let countText: string;
       let countValues: unknown[];
@@ -683,8 +686,13 @@ export class QueryBuilder<
       } catch (err) {
         const dbErr = isDbError(err)
           ? err
-          : createError("VALIDATION", err instanceof Error ? err.message : "Invalid query", err);
+          : createError(
+              "VALIDATION",
+              err instanceof Error ? err.message : "Invalid query",
+              err,
+            );
         this.ctx.hooks?.onError?.(dbErr);
+        if (this.state.throwOnError) throw dbErr;
         return { data: null, error: dbErr };
       }
       const headRunner = this.ctx.client ?? this.ctx.pool;
