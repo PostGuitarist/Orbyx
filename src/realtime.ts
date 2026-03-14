@@ -76,6 +76,7 @@ export class RealtimeChannel {
       resolveSubscribing = resolve;
     });
 
+    let client: Client | undefined;
     try {
       const connOpts =
         typeof this.connection === "string"
@@ -88,18 +89,19 @@ export class RealtimeChannel {
               database: this.connection.database,
               ssl: this.connection.ssl as boolean | { rejectUnauthorized?: boolean } | undefined,
             };
-      const client = new Client(connOpts);
+      client = new Client(connOpts);
       await client.connect();
-      client.on("error", (err) => {
+      const connectedClient = client;
+      connectedClient.on("error", (err) => {
         console.error(
           `[Orbyx RealtimeChannel] Connection error on channel "${this.channelName}":`,
           err,
         );
-        client.removeAllListeners();
-        client.end().catch(() => {});
+        connectedClient.removeAllListeners();
+        connectedClient.end().catch(() => {});
         this.pgClient = null;
       });
-      client.on("notification", (msg) => {
+      connectedClient.on("notification", (msg) => {
         const payload = msg.payload ?? null;
         for (const h of this.handlers) {
           try {
@@ -112,12 +114,16 @@ export class RealtimeChannel {
           }
         }
       });
-      await client.query(`LISTEN ${quoteChannelId(this.channelName)}`);
-      this.pgClient = client;
+      await connectedClient.query(`LISTEN ${quoteChannelId(this.channelName)}`);
+      this.pgClient = connectedClient;
       const successResult: { error: Error | null } = { error: null };
       resolveSubscribing(successResult);
       return successResult;
     } catch (err) {
+      if (client && this.pgClient !== client) {
+        client.removeAllListeners();
+        client.end().catch(() => {});
+      }
       this.pgClient = null;
       const error = err instanceof Error ? err : new Error(String(err));
       const failResult = { error };
